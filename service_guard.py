@@ -232,6 +232,33 @@ class ServiceGuard:
                 reply = re.sub(pattern, '', reply)
             if rule['text'] not in reply:
                 reply = reply.rstrip() + '\n\n' + rule['text']
+        comparison = self.config.get('price_comparison')
+        if comparison and all(re.search(p, context) for p in comparison['all_patterns']):
+            for order in state.get('orders', {}).values():
+                items = order.get('items', [])
+                if len(items) != 1 or not isinstance(order.get('amount'), int):
+                    continue
+                item = items[0]
+                key = comparison['product_lookup'] + ':' + json.dumps({'sku': item.get('sku')}, sort_keys=True)
+                lookup = state.get('evidence', {}).get(key, {})
+                product = lookup.get('data') or {}
+                if lookup.get('http_status') != 200 or not isinstance(product, dict) or not isinstance(product.get('price'), int) or not isinstance(item.get('qty'), int):
+                    continue
+                paid, current = order['amount'], product['price'] * item['qty']
+                difference = paid-current
+                if difference > 0 and not all(f'{n:,}' in reply for n in (paid, current, difference)):
+                    reply += f'\n\n확인된 대상 주문의 구매금액은 {paid:,}원, 동일 상품·수량의 현재 판매금액은 {current:,}원이며 차액은 {difference:,}원입니다.'
+            for fingerprint, result in state.get('writes', {}).items():
+                try:
+                    operation, args = json.loads(fingerprint)
+                except (ValueError, TypeError):
+                    continue
+                if operation != comparison.get('coupon_operation') or result.get('http_status') != 200:
+                    continue
+                amount = comparison.get('coupon_amounts', {}).get(args.get('promo_code'))
+                days = comparison.get('coupon_valid_days')
+                if amount and days:
+                    reply += f'\n접수한 보상쿠폰 금액은 {amount:,}원이며, 유효기간은 발급일부터 {days}일입니다.'
         options = self.config.get('remedy_options', {})
         if options and all(re.search(p, context) for p in options['all_patterns']) and all(label in reply for label in options['labels']):
             state['remedy_offer_turn'] = len(state.get('customer_texts', []))-1

@@ -173,3 +173,22 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('submitted',self.guard.finalize('Checking.',self.state))
         self.state['completed_handoffs']={'LOGISTICS':{'http_status':200}}
         self.assertIn('Schedule review submitted.',self.guard.finalize('Checking.',self.state))
+
+    def test_price_comparison_uses_verified_order_and_matching_product(self):
+        self.guard.config['price_comparison']={'all_patterns':['price drop'],'product_lookup':'product'}
+        self.state['customer_texts'].append('price drop compensation')
+        self.state['orders']={'own':{'amount':32000,'items':[{'sku':'A','qty':1}]}}
+        self.state['evidence']={'product:{"sku": "B"}':{'data':{'price':1}}}
+        self.assertNotIn('차액',self.guard.finalize('Submitted.',self.state))
+        self.state['evidence']['product:{"sku": "A"}']={'http_status':200,'data':{'price':27900}}
+        result=self.guard.finalize('Submitted.',self.state)
+        for value in ['32,000','27,900','4,100']:self.assertIn(value,result)
+
+    def test_coupon_notice_requires_successful_request(self):
+        self.guard.config['price_comparison']={'all_patterns':['price drop'],'product_lookup':'product','coupon_operation':'coupon','coupon_amounts':{'C5000':5000},'coupon_valid_days':90}
+        self.state['customer_texts'].append('price drop')
+        self.state['writes']={'["coupon", {"promo_code":"C5000"}]':{'http_status':400}}
+        self.assertNotIn('90일',self.guard.finalize('Checking.',self.state))
+        self.state['writes']['["coupon", {"promo_code":"C5000"}]']={'http_status':200}
+        result=self.guard.finalize('Submitted.',self.state)
+        self.assertIn('5,000원',result);self.assertIn('발급일부터 90일',result)
