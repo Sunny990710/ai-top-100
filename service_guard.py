@@ -46,6 +46,12 @@ class ServiceGuard:
     async def execute(self, agent, client, name, args, state):
         cfg = self.config
         op = agent.operations[name]
+        for field, pattern in cfg.get('customer_value_fields', {}).get(name, {}).items():
+            supplied = re.findall(pattern, '\n'.join(state.get('customer_texts', [])))
+            matches = [value for value in supplied if re.sub(r'\D', '', value) == re.sub(r'\D', '', str(args.get(field, '')))]
+            if not matches:
+                return {'error': 'Use the exact value supplied by the customer; do not substitute stored account data.', 'field': field}
+            args = {**args, field: matches[-1]}
         if name == cfg['escalate']:
             pending = self.requirements(state)
             for target, completed in state.get('completed_handoffs', {}).items():
@@ -200,6 +206,11 @@ class ServiceGuard:
     async def prepare(self, agent, client, state):
         results = []
         text = '\n'.join(state.get('customer_texts', []))
+        confirmed = set(re.findall(self.config.get('order_pattern', r'(?!)'), text))
+        if len(confirmed) == 1:
+            state['confirmed_order'] = next(iter(confirmed))
+        else:
+            state.pop('confirmed_order', None)
         for rule in self.config.get('required_reads', []):
             if not all(re.search(p, text) for p in rule['all_patterns']):
                 continue
@@ -262,6 +273,12 @@ class ServiceGuard:
         options = self.config.get('remedy_options', {})
         if options and all(re.search(p, context) for p in options['all_patterns']) and all(label in reply for label in options['labels']):
             state['remedy_offer_turn'] = len(state.get('customer_texts', []))-1
+        returns = self.config.get('return_notice')
+        if returns and all(re.search(p, context) for p in returns['all_patterns']):
+            for fact in self.calendar_facts(state):
+                if fact.get('delivery_status') == 'DELIVERED' and fact.get('order_no') in state.get('orders', {}):
+                    reply += (f"\n\n배송 조회상 {fact['received_date']} 수령 완료이며 상담일 기준 {fact['elapsed_days']}일 경과했습니다. "
+                              f"단순 변심은 수령 후 {fact['return_window_days']}일 이내·미개봉 조건이며 왕복 배송비는 고객님 부담입니다.")
         intake = re.search(r'상담\s*인입\s*일시:\s*(\d{4})-', context)
         if intake:
             def weekday(match):
@@ -300,7 +317,8 @@ class ServiceGuard:
                     continue
                 received = date.fromisoformat(row['delivered_at'][:10])
                 fact = {'order_no': row.get('order_no'), 'received_date': str(received),
-                        'today': str(today), 'elapsed_days': (today-received).days}
+                        'today': str(today), 'elapsed_days': (today-received).days,
+                        'delivery_status': row.get('status')}
                 window = self.config.get('return_window_days')
                 if window:
                     fact['return_window_days'] = window

@@ -192,3 +192,20 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
         self.state['writes']['["coupon", {"promo_code":"C5000"}]']={'http_status':200}
         result=self.guard.finalize('Submitted.',self.state)
         self.assertIn('5,000원',result);self.assertIn('발급일부터 90일',result)
+
+    async def test_customer_number_preserves_original_format(self):
+        self.guard.config['customer_value_fields']={'reship':{'receipt_number':r'(?<![0-9])0[0-9]{2}-?[0-9]{4}-?[0-9]{4}(?![0-9])'}}
+        self.state['customer_texts'].append('Use 010-1234-5678 for receipt.')
+        r=await self.execute('reship',{'receipt_number':'01012345678'})
+        self.assertEqual(r['http_status'],200)
+        self.assertEqual(self.agent.calls[-1][1]['receipt_number'],'010-1234-5678')
+        self.assertIn('error',await self.execute('reship',{'receipt_number':'01099999999'}))
+
+    def test_return_notice_uses_delivery_date_not_payment_date(self):
+        self.guard.config['return_notice']={'all_patterns':['change of mind']}
+        self.guard.config['return_window_days']=7
+        self.state['customer_texts'].append('상담 인입 일시: 2037-06-30 change of mind')
+        self.state['orders']={'own':{'ordered_at':'2037-06-23'}}
+        self.state['evidence']={'shipping':{'http_status':200,'data':[{'order_no':'own','status':'DELIVERED','delivered_at':'2037-06-26T14:00:00+09:00'}]}}
+        answer=self.guard.finalize('No request submitted.',self.state)
+        for text in ['2037-06-26','4일','7일','미개봉','왕복']:self.assertIn(text,answer)
