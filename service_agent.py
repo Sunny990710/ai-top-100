@@ -113,25 +113,43 @@ class ServiceAgent:
         fingerprint = json.dumps([name, arguments], ensure_ascii=False, sort_keys=True)
         if op['method'] == 'POST' and fingerprint in state['writes']:
             return state['writes'][fingerprint]
-        self.calls.append(now)
-        state['call_count'] += 1
-        try:
-            response = await client.request(op['method'], self.base + path,
-                params=query or None, json=body if op['method']=='POST' else None,
-                headers={'Authorization': 'Bearer '+self.token,
-                         self.profile['case_header']: state['case_id']}, timeout=7)
-            result = {'http_status': response.status_code,
-                      'data': response.json() if response.content else None}
-            print(f'Service operation={name} status={response.status_code}', flush=True)
-            if response.is_success:
-                self.remember_verified(result['data'], state)
-            if op['method']=='POST' and response.is_success:
-                state['writes'][fingerprint] = result
-            if response.status_code == 429:
-                result['instruction'] = 'Rate limit. Do not retry immediately or claim success.'
-            return result
-        except (httpx.HTTPError, ValueError):
-            return {'error': 'API response unavailable; outcome is unconfirmed. Never claim completion.'}
+        # POST retries are enabled only when the API contract guarantees idempotency.
+        attempts = 2 if op['method'] == 'GET' or self.profile.get('idempotent_requests') else 1
+        for attempt in range(attempts):
+            if len(self.calls) >= 85 or state['call_count'] >= 80:
+                return {'error': 'API call budget reached; do not retry this turn.'}
+            self.calls.append(time.monotonic())
+            state['call_count'] += 1
+            try:
+                response = await client.request(op['method'], self.base + path,
+                    params=query or None, json=body if op['method']=='POST' else None,
+                    headers={'Authorization': 'Bearer '+self.token,
+                             self.profile['case_header']: state['case_id']}, timeout=7)
+                result = {'http_status': response.status_code,
+                          'data': response.json() if response.content else None}
+                print(f'Service operation={name} status={response.status_code}', flush=True)
+                if response.is_success:
+                    self.remember_verified(result['data'], state)
+                    if op['method']=='POST':
+                        state['writes'][fingerprint] = result
+                    return result
+                delay = 0.5
+                retry = response.status_code in (500, 502, 503, 504)
+                if response.status_code == 429:
+                    result['instruction'] = 'Rate limit. Never claim completion.'
+                    try:
+                        delay = float(response.headers.get('Retry-After', '60'))
+                    except ValueError:
+                        delay = 60
+                    retry = 0 <= delay <= 3 and '누적' not in str(result['data'])
+                    result['retry_after_seconds'] = delay
+                if not retry or attempt+1 == attempts:
+                    return result
+            except (httpx.HTTPError, ValueError):
+                delay = 0.5
+                if attempt+1 == attempts:
+                    return {'error': 'API response unavailable; outcome is unconfirmed. Never claim completion.'}
+            await asyncio.sleep(delay)
 
     def remember_verified(self, data, state):
         if isinstance(data, dict):
@@ -223,10 +241,19 @@ class ServiceAgent:
             await asyncio.gather(*(run(i) for i in pending))
 
     async def review_answer(self, client, draft, state):
+        actions = []
+        for fingerprint, outcome in state['writes'].items():
+            try:
+                operation, arguments = json.loads(fingerprint)
+                actions.append({'operation': operation, 'arguments': arguments, 'result': outcome})
+            except (ValueError, TypeError):
+                continue
         facts = {'draft': draft, 'customer_messages': state.get('customer_texts', [])[-2:],
+                 'audio_transcripts': state.get('audio_transcripts', [])[-2:],
                  'calendar_calculations': self.guard.calendar_facts(state) if self.guard else [],
                  'verified_orders': state.get('orders') or None,
                  'confirmed_requests': list(state['writes'].values()),
+                 'confirmed_action_arguments': actions,
                  'verified_lookups': list(state.get('evidence', {}).items())[-12:]}
         body = {'model': self.review_model, 'store': False, 'max_output_tokens': 3000,
             'instructions': '고객에게 보낼 최종 답변을 검증·교정하는 편집자입니다. 도구를 실행하지 않습니다. '
@@ -266,6 +293,9 @@ class ServiceAgent:
         try:
             async with asyncio.timeout(48):
                 content = await self.user_content(client, text)
+                heard = [part['text'].split('] ', 1)[-1] for part in content
+                         if part.get('text', '').startswith('[고객 음성 전사')]
+                state.setdefault('audio_transcripts', []).extend(heard)
                 messages.append({'role': 'user', 'content': content})
                 if any('[고객 음성 전사' in part.get('text', '') for part in content):
                     messages.append({'role': 'developer', 'content': '음성 문의는 첫 문장에서 들은 문의 요지를 확인하고, 아직 말하지 않은 요청 사유와 대상 주문을 함께 질문하세요. 음성에서 확실하지 않은 주문번호·상품하자·증상을 추측하지 마세요.'})
@@ -317,6 +347,8 @@ class ServiceAgent:
                         if self.guard:
                             result = await self.review_answer(client, result, state)
                             result = self.guard.finalize(result, state)
+                            if heard:
+                                result = '음성 문의는 “'+heard[0][:250]+'”로 들었습니다.\n\n'+result
                             # Future turns see the verified reply, not the discarded draft.
                             messages = messages[:-len(outputs)] + [{'role': 'assistant', 'content': result}]
                         # Preserve verified tool outputs across turns, not only the prose answer.
@@ -328,4 +360,16 @@ class ServiceAgent:
         # Keep successfully received tool outcomes, including writes, even on timeout.
         if messages and messages[-1].get('type') == 'function_call_output':
             state['messages'] = messages
+        receipts = []
+        for result in state['writes'].values():
+            row = result.get('data')
+            if result.get('http_status') == 200 and isinstance(row, dict):
+                for field in ('request_id', 'refund_id', 'escalation_id'):
+                    if isinstance(row.get(field), str) and row[field] not in receipts:
+                        receipts.append(row[field])
+        if receipts:
+            return ('확인된 요청 접수번호: '+', '.join(receipts)+'.\n'
+                    '위 요청의 접수는 확인됐지만 상세 안내를 생성하는 중 연결이 지연됐습니다. '
+                    '접수는 환급·출고 등 실제 처리 완료를 의미하지 않습니다. 추가 요청의 접수 여부는 아직 확인되지 않았습니다. '
+                    '다시 문의하시면 기존 접수 내역을 확인해 이어서 안내하겠습니다.')
         return '확인에 시간이 걸리고 있습니다. 처리 완료 여부는 아직 확정할 수 없어요. 같은 문의를 다시 보내주시면 접수 내역을 확인해 이어서 안내하겠습니다.'

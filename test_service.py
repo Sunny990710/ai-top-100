@@ -124,3 +124,52 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             answer=await self.agent.review_answer(client,'이미 처리가 완료됐습니다.',self.state)
         self.assertEqual(answer,'접수번호 R-verified. 아직 처리 완료는 아닙니다.')
+
+    async def test_idempotent_write_retries_identical_body_after_network_loss(self):
+        self.agent.profile['idempotent_requests']=True
+        seen=[]
+        def handler(req):
+            seen.append(req.content)
+            if len(seen)==1: raise httpx.ReadError('response lost',request=req)
+            return httpx.Response(200,json={'request_id':'R1'})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            result=await self.agent.execute(client,'submit_request',{'record_id':'1'},self.state)
+        self.assertEqual(result['http_status'],200)
+        self.assertEqual(seen,[b'{}',b'{}'])
+        self.assertEqual(len(self.state['writes']),1)
+
+    async def test_non_idempotent_write_not_retried(self):
+        seen=[]
+        def handler(req):
+            seen.append(req);raise httpx.ReadError('lost',request=req)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            result=await self.agent.execute(client,'submit_request',{'record_id':'1'},self.state)
+        self.assertIn('unconfirmed',result['error']);self.assertEqual(len(seen),1)
+
+    async def test_long_rate_limit_is_not_retried(self):
+        seen=[]
+        def handler(req):
+            seen.append(req);return httpx.Response(429,headers={'Retry-After':'60'},json={'code':'RATE_LIMIT'})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            result=await self.agent.execute(client,'read_record',{'record_id':'1'},self.state)
+        self.assertEqual(result['retry_after_seconds'],60);self.assertEqual(len(seen),1)
+
+    async def test_review_failure_keeps_confirmed_receipt(self):
+        self.state['writes']={'x':{'http_status':200,'data':{'request_id':'R-confirmed'}}}
+        def handler(req):return httpx.Response(503,json={'error':'temporary'})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            answer=await self.agent.answer(client,{'botGroupKey':'a','botUserKey':'b','content':'follow up'})
+        self.assertIn('R-confirmed',answer);self.assertIn('접수는 확인',answer)
+
+    async def test_audio_transcript_survives_final_review(self):
+        from service_guard import ServiceGuard
+        self.agent.guard=ServiceGuard({'principal_pattern':'never matches','handoff_rules':[]})
+        async def user_content(client,text):
+            return [{'type':'input_text','text':'[고객 음성 전사, 불확실한 내용은 질문] 지난주 받은 수박 환불할 수 있나요?'}]
+        self.agent.user_content=user_content
+        def handler(req):
+            return httpx.Response(200,json={'output':[{'type':'message','role':'assistant','content':[{'type':'output_text','text':'주문번호와 환불 사유를 알려주세요.'}]}]})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            answer=await self.agent.answer(client,{'botGroupKey':'a','botUserKey':'b','content':'TC: sample'})
+        self.assertIn('음성 문의는 “지난주 받은 수박 환불할 수 있나요?”로 들었습니다.',answer)
+        self.assertIn('주문번호와 환불 사유',answer)

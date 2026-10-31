@@ -63,7 +63,8 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_status_lookup_blocks_action(self):
         self.guard.config['prerequisites']={'reship':[{'operation':'shipments','fields':['order_no']}]}
         r=await self.execute('reship',{'order_no':'own','shipment_id':'S1'})
-        self.assertIn('Required status',r['error']);self.assertEqual(self.agent.calls,[])
+        self.assertIn('Resource ownership',r['error'])
+        self.assertNotIn('reship',[n for n,a in self.agent.calls])
     async def test_order_identifier_next_to_korean_particle(self):
         self.guard.config['order_pattern']=r'(?<![0-9])[0-9]{9}(?![0-9])'
         self.state['customer_texts'].append('주문번호 123456789이 대상 맞아요')
@@ -86,3 +87,89 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
         fact=self.guard.calendar_facts(self.state)[0]
         self.assertEqual(fact['elapsed_days'],4)
         self.assertEqual(fact['return_window_last_day'],'2037-07-03')
+
+    async def test_changed_choice_blocks_old_selection(self):
+        self.guard.config['customer_choices']={'reship':'reship'}
+        self.guard.config['choice_rejections']={'reship':['refund instead']}
+        self.guard.config['hold_pattern']='hold'
+        self.state['customer_texts']=['reship please','refund instead']
+        self.assertIn('error',await self.execute('reship',{'shipment_id':'S1'}))
+        self.assertEqual(self.agent.calls,[])
+
+    def test_handoff_body_stable_across_restarts_and_wording(self):
+        rule=self.guard.config['security']
+        first={'case_id':'sample','denied_orders':{'O1'},'customer_texts':['first wording']}
+        second={'case_id':'sample','denied_orders':{'O1'},'customer_texts':['different wording']}
+        self.assertEqual(self.guard.handoff_reason(rule,first),self.guard.handoff_reason(rule,second))
+
+    async def test_order_history_does_not_authorize_unselected_shipment(self):
+        self.agent.operations['orders']={}
+        original=self.agent.request
+        async def request(client,name,args,state):
+            if name=='orders':return {'http_status':200,'data':[{'member_id':'M1','order_no':'own','shipment_id':'S1','payment_refs':['P1']}]}
+            return await original(client,name,args,state)
+        self.agent.request=request
+        await self.execute('orders',{'member_id':'M1'})
+        self.assertNotIn('orders',self.state)
+        self.assertIn('error',await self.execute('reship',{'shipment_id':'S1'}))
+
+    async def test_required_lookup_runs_after_ownership_before_write(self):
+        self.agent.operations['update']={}
+        original=self.agent.request
+        async def request(client,name,args,state):
+            if name=='update':
+                self.agent.calls.append((name,args))
+                return {'http_status':200,'data':{'request_id':'R1'}}
+            return await original(client,name,args,state)
+        self.agent.request=request
+        self.guard.config['prerequisites']={'update':[{'operation':'shipments','fields':['order_no']}]}
+        result=await self.execute('update',{'order_no':'own'})
+        self.assertEqual(result['http_status'],200)
+        self.assertEqual([n for n,a in self.agent.calls],['members','order','shipments','update'])
+
+    async def test_full_refund_uses_paid_total_not_unit_price(self):
+        self.agent.operations['refund']={}
+        self.guard.config['refund_validation']={'operation':'refund','full_patterns':['full refund']}
+        self.state['orders']={'own':{'amount':35000,'items':[{'unit_price':28000}]}}
+        self.state['customer_texts'].append('full refund please')
+        self.state['member_id']='M1'
+        r=await self.execute('refund',{'order_no':'own','amount':28000})
+        self.assertEqual(r['required_amount'],35000)
+        self.assertEqual(self.agent.calls,[])
+        original=self.agent.request
+        async def request(client,name,args,state):
+            if name=='refund':return {'http_status':200,'data':{'refund_id':'RF1'}}
+            return await original(client,name,args,state)
+        self.agent.request=request
+        self.assertEqual((await self.execute('refund',{'order_no':'own','amount':35000}))['http_status'],200)
+
+    def test_slash_date_weekday_uses_intake_year(self):
+        self.state['customer_texts'].append('상담 인입 일시: 2037-06-30')
+        self.assertEqual(self.guard.finalize('회신 7/3(목요일)',self.state),'회신 7월 3일(금)')
+
+    def test_dispatch_calendar_skips_holiday(self):
+        self.guard.config['dispatch_calendar']={'weekdays':[0,2,4],'holidays':['2037-07-01']}
+        self.state['customer_texts'].append('상담 인입 일시: 2037-06-30')
+        facts=self.guard.calendar_facts(self.state)
+        self.assertEqual(facts[0]['policy_next_dispatch_date'],'2037-07-03')
+        self.assertEqual(facts[0]['usual_arrival_from'],'2037-07-04')
+
+    async def test_remedy_selection_must_follow_options(self):
+        self.guard.config['customer_choices']={'reship':'reship'}
+        self.guard.config['hold_pattern']='hold'
+        self.guard.config['remedy_options']={'all_patterns':['quality'],'operations':['reship'],'labels':['refund','reship']}
+        self.state['customer_texts']=['quality complaint: reship please']
+        self.assertIn('both available', (await self.execute('reship',{'shipment_id':'S1'}))['error'])
+        self.guard.finalize('Choose refund or reship.',self.state)
+        self.guard.capture(self.state,'order details only')
+        self.assertIn('both available', (await self.execute('reship',{'shipment_id':'S1'}))['error'])
+        await self.execute('shipments',{'order_no':'own'})
+        self.guard.capture(self.state,'reship please')
+        self.assertEqual((await self.execute('reship',{'shipment_id':'S1'}))['http_status'],200)
+
+    def test_submission_notice_requires_confirmed_handoff(self):
+        self.guard.config['required_notices']=[{'all_patterns':['delivery'], 'require_handoff':'LOGISTICS','text':'Schedule review submitted.'}]
+        self.state['customer_texts'].append('delivery complaint')
+        self.assertNotIn('submitted',self.guard.finalize('Checking.',self.state))
+        self.state['completed_handoffs']={'LOGISTICS':{'http_status':200}}
+        self.assertIn('Schedule review submitted.',self.guard.finalize('Checking.',self.state))

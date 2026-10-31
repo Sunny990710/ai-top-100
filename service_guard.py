@@ -47,24 +47,33 @@ class ServiceGuard:
         cfg = self.config
         op = agent.operations[name]
         if name == cfg['escalate']:
-            self.requirements(state)
+            pending = self.requirements(state)
             for target, completed in state.get('completed_handoffs', {}).items():
                 if target in args.get('reason', ''):
                     return completed
+            candidates = [r for r in pending.values() if r['target'] in args.get('reason', '')]
+            if not candidates and len(pending) == 1:
+                candidates = list(pending.values())
+            if len(candidates) == 1:
+                rule = candidates[0]
+                args = {'lane': rule['lane'], 'reason': self.handoff_reason(rule, state)}
             for rule in cfg.get('handoff_rules', []):
                 if rule.get('defer_until_order') and rule['target'] in args.get('reason', '') and not state.get('orders'):
                     return {'error': 'Confirm the target order before filing this review, and include the order and unconfirmed facts in the reason.'}
         choice = cfg.get('customer_choices', {}).get(name)
         if choice:
             texts = state.get('customer_texts', [])
-            if not any(re.search(choice, t) for t in texts) or (texts and re.search(cfg['hold_pattern'], texts[-1])):
+            options = cfg.get('remedy_options', {})
+            if name in options.get('operations', []) and all(re.search(p, '\n'.join(texts)) for p in options['all_patterns']):
+                offered = state.get('remedy_offer_turn')
+                if offered is None or not any(re.search(choice, t) for t in texts[offered+1:]):
+                    return {'error': 'Explain both available remedies first, then wait for the customer to select one. The initial complaint is not a selection after disclosure.'}
+            decisions = [t for t in texts if re.search(choice, t) or any(
+                re.search(p, t) for p in cfg.get('choice_rejections', {}).get(name, []))]
+            latest = decisions[-1] if decisions else ''
+            rejected = any(re.search(p, latest) for p in cfg.get('choice_rejections', {}).get(name, []))
+            if not latest or rejected or (texts and re.search(cfg['hold_pattern'], texts[-1])):
                 return {'error': 'Customer has not selected this action, or asked to hold it. Explain options; do not submit or claim submission.'}
-        for requirement in cfg.get('prerequisites', {}).get(name, []):
-            lookup_args = {field: args[field] for field in requirement['fields'] if field in args}
-            key = requirement['operation'] + ':' + json.dumps(lookup_args, sort_keys=True)
-            if state.get('evidence', {}).get(key, {}).get('http_status') != 200:
-                return {'error': 'Required status lookup must succeed before this action.',
-                        'operation': requirement['operation'], 'arguments': lookup_args}
         # All account queries are scoped to the supplied authenticated intake account.
         protected = any(k in args for k in ('member_id', 'order_no', 'approval_no', 'shipment_id', 'subscription_id')) or name == cfg['member_search']
         if protected:
@@ -100,16 +109,37 @@ class ServiceGuard:
             for field in ('approval_no', 'shipment_id', 'subscription_id'):
                 if field in args and args[field] not in state.get('owned_resources', {}).get(field, set()):
                     return {'error': 'Resource ownership not established. Query the verified own order first.', 'field': field}
+        refund = cfg.get('refund_validation', {})
+        if name == refund.get('operation'):
+            order = state.get('orders', {}).get(args.get('order_no'), {})
+            total = order.get('amount')
+            amount = args.get('amount')
+            if not isinstance(total, int) or not isinstance(amount, int) or not 0 < amount <= total:
+                return {'error': 'Refund must be positive and within verified order payment total.', 'verified_total': total}
+            context = '\n'.join(state.get('customer_texts', [])) + '\n' + args.get('reason', '')
+            single_unit = sum(item.get('qty', 1) for item in order.get('items', [])) == 1
+            full = single_unit or any(re.search(p, context) for p in refund.get('explicit_full_patterns', []))
+            if full and any(re.search(p, context) for p in refund.get('full_patterns', [])) and amount != total:
+                return {'error': 'Full refund must use verified order total, not item unit price. Correct the amount before submission.', 'required_amount': total}
+        for requirement in cfg.get('prerequisites', {}).get(name, []):
+            lookup_args = {field: args[field] for field in requirement['fields'] if field in args}
+            if len(lookup_args) != len(requirement['fields']):
+                return {'error': 'Missing target for required status lookup.'}
+            key = requirement['operation'] + ':' + json.dumps(lookup_args, sort_keys=True)
+            if state.get('evidence', {}).get(key, {}).get('http_status') != 200:
+                lookup = await self.execute(agent, client, requirement['operation'], lookup_args, state)
+                if lookup.get('http_status') != 200:
+                    return {'error': 'Required status lookup failed; no action submitted.', 'lookup': lookup}
         result = await agent.request(client, name, args, state)
         if result.get('http_status') == 200:
             data = result.get('data')
             # Order collections are scoped and stripped before entering model context.
             if name == cfg.get('order_list'):
                 data = [r for r in data if r.get('member_id') == state.get('member_id')]
-                for row in data:
-                    state.setdefault('orders', {})[row['order_no']] = self.redact(row)
-                    self.remember_resources(row, state)
-            if protected:
+                # History establishes purchase patterns, not the customer's target.
+                # Dependent writes require an explicit order selection and lookup.
+                state['order_history'] = self.redact(data)
+            if protected and name != cfg.get('order_list'):
                 self.remember_resources(data, state)
             result = {**result, 'data': self.redact(data)}
             if name == cfg['escalate']:
@@ -153,14 +183,19 @@ class ServiceGuard:
     async def complete(self, agent, client, state):
         results = []
         for target, rule in self.requirements(state).items():
-            reason = json.dumps({'target': target, 'priority': rule['priority'],
-                'reason': rule['reason'], 'orders': list(state.get('orders', {})),
-                'denied_orders': list(state.get('denied_orders', set())),
-                'customer_request': '\n'.join(state.get('customer_texts', []))[-1800:],
-                'verified_operations': list(state.get('evidence', {}))[-12:]}, ensure_ascii=False)
+            reason = self.handoff_reason(rule, state)
             result = await self.execute(agent, client, self.config['escalate'], {'lane': rule['lane'], 'reason': reason[:3900]}, state)
             results.append({'target': target, 'result': result})
         return results
+
+    def handoff_reason(self, rule, state):
+        # Stable across wording changes/restarts; the API deduplicates exact bodies.
+        return json.dumps({'case_id': state.get('case_id'), 'target': rule['target'],
+            'priority': rule['priority'], 'reason': rule['reason'],
+            'orders': sorted(state.get('orders', {})),
+            'denied_orders': sorted(state.get('denied_orders', set())),
+            'lots': sorted(state.get('verified_values', {}).get('lot_id', set()))},
+            ensure_ascii=False, sort_keys=True)
 
     async def prepare(self, agent, client, state):
         results = []
@@ -185,6 +220,10 @@ class ServiceGuard:
     def finalize(self, reply, state):
         context = '\n'.join(state.get('customer_texts', []))
         for rule in self.config.get('required_notices', []):
+            if rule.get('require_order') and not state.get('orders'):
+                continue
+            if rule.get('require_handoff') and rule['require_handoff'] not in state.get('completed_handoffs', {}):
+                continue
             if not all(re.search(p, context) for p in rule['all_patterns']):
                 continue
             if any(re.search(p, context) for p in rule.get('exclude_patterns', [])):
@@ -193,6 +232,9 @@ class ServiceGuard:
                 reply = re.sub(pattern, '', reply)
             if rule['text'] not in reply:
                 reply = reply.rstrip() + '\n\n' + rule['text']
+        options = self.config.get('remedy_options', {})
+        if options and all(re.search(p, context) for p in options['all_patterns']) and all(label in reply for label in options['labels']):
+            state['remedy_offer_turn'] = len(state.get('customer_texts', []))-1
         intake = re.search(r'상담\s*인입\s*일시:\s*(\d{4})-', context)
         if intake:
             def weekday(match):
@@ -202,6 +244,7 @@ class ServiceGuard:
                 except ValueError:
                     return match.group(0)
             reply = re.sub(r'(\d{1,2})월\s*(\d{1,2})일\s*\([월화수목금토일]\)', weekday, reply)
+            reply = re.sub(r'(?<![\d/])(\d{1,2})/(\d{1,2})\s*\([월화수목금토일](?:요일)?\)', weekday, reply)
         return reply.strip()
 
     def calendar_facts(self, state):
@@ -211,6 +254,18 @@ class ServiceGuard:
             return []
         today = date.fromisoformat(intake.group(1))
         facts = []
+        shipping = self.config.get('dispatch_calendar')
+        if shipping and all(re.search(p, context) for p in shipping.get('all_patterns', [])):
+            next_day = today + timedelta(days=1)
+            holidays = set(shipping.get('holidays', []))
+            for _ in range(30):
+                if next_day.weekday() in shipping['weekdays'] and str(next_day) not in holidays:
+                    facts.append({'policy_next_dispatch_date': str(next_day),
+                        'usual_arrival_from': str(next_day+timedelta(days=1)),
+                        'usual_arrival_to': str(next_day+timedelta(days=2)),
+                        'note': 'General calendar estimate only; individual dispatch and arrival are not guaranteed.'})
+                    break
+                next_day += timedelta(days=1)
         for result in state.get('evidence', {}).values():
             data = result.get('data')
             for row in data if isinstance(data, list) else [data]:
