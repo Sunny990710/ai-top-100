@@ -121,7 +121,7 @@ class ServiceAgent:
 
     def state_for(self, identity, text):
         # Only an explicit case label at message start may select a case.
-        match = re.match(self.profile['case_pattern'], text, re.I)
+        match = re.search(self.profile['case_pattern'], text[:1500], re.I | re.M)
         case_id = match.group(1) if match else None
         state = self.states.get(identity)
         if state is None or (case_id and case_id != state['case_id']):
