@@ -300,7 +300,9 @@ class ServiceAgent:
                 if any('[고객 음성 전사' in part.get('text', '') for part in content):
                     messages.append({'role': 'developer', 'content': '음성 문의는 첫 문장에서 들은 문의 요지를 확인하고, 아직 말하지 않은 요청 사유와 대상 주문을 함께 질문하세요. 음성에서 확실하지 않은 주문번호·상품하자·증상을 추측하지 마세요.'})
                 if self.guard and state.get('case_id') and self.token:
-                    member = await self.guard.principal(self, client, state)
+                    member = state.get('member_id')
+                    if not member and self.guard.needs_principal(state):
+                        member = await self.guard.principal(self, client, state)
                     if member:
                         messages.append({'role': 'developer', 'content': 'Verified intake account member_id: '+member+'. Use this ID only. Target order must be confirmed by the customer.'})
                     prepared = await self.guard.prepare(self, client, state)

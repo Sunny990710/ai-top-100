@@ -36,6 +36,14 @@ class ServiceGuard:
         state['member'] = self.redact(matches[0])
         return state['member_id']
 
+    def needs_principal(self, state):
+        text = '\n'.join(state.get('customer_texts', []))
+        if re.search(self.config.get('order_pattern', r'(?!)'), text):
+            return True
+        return any('$member_id' in rule.get('arguments', {}).values()
+                   and all(re.search(p, text) for p in rule['all_patterns'])
+                   for rule in self.config.get('required_reads', []))
+
     def redact(self, value):
         if isinstance(value, list):
             return [self.redact(v) for v in value]

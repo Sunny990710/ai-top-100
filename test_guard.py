@@ -209,3 +209,14 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
         self.state['evidence']={'shipping':{'http_status':200,'data':[{'order_no':'own','status':'DELIVERED','delivered_at':'2037-06-26T14:00:00+09:00'}]}}
         answer=self.guard.finalize('No request submitted.',self.state)
         for text in ['2037-06-26','4일','7일','미개봉','왕복']:self.assertIn(text,answer)
+
+    def test_public_policy_does_not_need_account_lookup(self):
+        self.guard.config['order_pattern']=r'(?<![0-9])[0-9]{9}(?![0-9])'
+        self.assertFalse(self.guard.needs_principal(self.state))
+        self.state['customer_texts'].append('order 123456789')
+        self.assertTrue(self.guard.needs_principal(self.state))
+
+    def test_bulk_history_requires_account_even_without_order(self):
+        self.guard.config['required_reads']=[{'all_patterns':['bulk'],'arguments':{'member_id':'$member_id'}}]
+        self.state['customer_texts'].append('bulk history')
+        self.assertTrue(self.guard.needs_principal(self.state))
