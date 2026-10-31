@@ -18,12 +18,26 @@ IMAGE_TOOL = {
 }
 
 
+def parse_storage_url(value):
+    value = value.strip()
+    if value.startswith('export '):
+        value = value[7:].strip()
+    if value.startswith('CLOUDINARY_URL='):
+        value = value.split('=', 1)[1].strip()
+    value = value.strip('\"\'').strip()
+    try:
+        return urlsplit(value)
+    except ValueError:
+        return urlsplit('')
+
+
 class ImageService:
     def __init__(self):
         self.key = os.environ.get('OPENAI_API_KEY', '').strip()
         self.model = os.environ.get('OPENAI_IMAGE_MODEL', 'gpt-image-1.5')
-        self.store = urlsplit(os.environ.get('CLOUDINARY_URL', ''))
+        self.store = parse_storage_url(os.environ.get('CLOUDINARY_URL', ''))
         self.slots = asyncio.Semaphore(2)
+        print(f'Image storage configured: {bool(self.configured())}', flush=True)
 
     def configured(self):
         return (self.store.scheme == 'cloudinary' and self.store.username

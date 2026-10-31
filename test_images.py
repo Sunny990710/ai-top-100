@@ -5,12 +5,18 @@ import unittest
 from unittest.mock import patch
 import httpx
 from ai import Assistant, outputs
-from image_service import ImageService
+from image_service import ImageService, parse_storage_url
 
 ENV = {'OPENAI_API_KEY': 'fake-openai',
        'CLOUDINARY_URL': 'cloudinary://fake-key:fake-secret@test-cloud'}
 
 class ImageTests(unittest.IsolatedAsyncioTestCase):
+    def test_copied_environment_formats(self):
+        for value in (ENV['CLOUDINARY_URL'], ' CLOUDINARY_URL="' + ENV['CLOUDINARY_URL'] + '"\n',
+                      "export CLOUDINARY_URL='" + ENV['CLOUDINARY_URL'] + "'"):
+            self.assertEqual(parse_storage_url(value).hostname, 'test-cloud')
+            self.assertEqual(parse_storage_url(value).password, 'fake-secret')
+
     async def test_generation_upload_and_bubble(self):
         calls = []
         def handler(request):
