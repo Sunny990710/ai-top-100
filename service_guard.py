@@ -54,6 +54,12 @@ class ServiceGuard:
     async def execute(self, agent, client, name, args, state):
         cfg = self.config
         op = agent.operations[name]
+        if name == cfg.get('order_list') and cfg.get('history_purpose_pattern'):
+            context = '\n'.join(state.get('customer_texts', []))
+            required = any(rule['operation'] == name and all(re.search(p, context) for p in rule['all_patterns'])
+                           for rule in cfg.get('required_reads', []))
+            if not required and not re.search(cfg['history_purpose_pattern'], context):
+                return {'error': 'Order history is not needed for this inquiry. Ask the customer for the target order number; do not search history to pick one.'}
         for field, pattern in cfg.get('customer_value_fields', {}).get(name, {}).items():
             supplied = re.findall(pattern, '\n'.join(state.get('customer_texts', [])))
             matches = [value for value in supplied if re.sub(r'\D', '', value) == re.sub(r'\D', '', str(args.get(field, '')))]
@@ -252,6 +258,9 @@ class ServiceGuard:
                 continue
             for pattern in rule.get('remove_unsupported', []):
                 reply = re.sub(pattern, '', reply)
+            satisfied = rule.get('satisfied_patterns', [])
+            if satisfied and all(re.search(pattern, reply) for pattern in satisfied):
+                continue
             if rule['text'] not in reply:
                 reply = reply.rstrip() + '\n\n' + rule['text']
         comparison = self.config.get('price_comparison')

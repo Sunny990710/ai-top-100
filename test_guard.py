@@ -27,6 +27,21 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_guessed_member_blocked(self):
         r=await self.execute('order',{'member_id':'invented','order_no':'own'})
         self.assertEqual(r['verified_member_id'],'M1');self.assertEqual(len(self.agent.calls),1)
+    async def test_history_not_used_to_guess_target_order(self):
+        self.agent.operations={**self.agent.operations,'orders':{}}
+        self.guard.config['history_purpose_pattern']='purchase history|bulk'
+        self.state['customer_texts']=['received spoiled product']
+        result=await self.execute('orders',{'member_id':'M1'})
+        self.assertIn('target order number',result['error'])
+        self.assertEqual(self.agent.calls,[])
+    async def test_required_history_still_checks_account_identity(self):
+        self.agent.operations={**self.agent.operations,'orders':{}}
+        self.guard.config['history_purpose_pattern']='purchase history'
+        self.guard.config['required_reads']=[{'operation':'orders','all_patterns':['50 units','again']}]
+        self.state['customer_texts']=['50 units again']
+        result=await self.execute('orders',{'member_id':'other'})
+        self.assertIn('Unverified member',result['error'])
+        self.assertEqual(len(self.agent.calls),1)
     async def test_resource_ownership_before_write(self):
         self.assertIn('error',await self.execute('reship',{'shipment_id':'S1'}))
         await self.execute('shipments',{'order_no':'own'})
@@ -44,6 +59,21 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
         url='https://example.com/'+'a'*80
         parts=split_text('안내 사항입니다. '*55+'\n'+url+'\n접수번호 E1 기한 금요일')
         self.assertTrue(all(len(p)<=500 for p in parts));self.assertTrue(any(url in p for p in parts));self.assertIn('기한 금요일',parts[-1])
+    def test_notice_preserves_missing_conditions_without_repeating_complete_notice(self):
+        self.guard.config['required_notices']=[{'all_patterns':['claim'],
+            'text':'Keep document A and document B.', 'satisfied_patterns':['document A','document B']}]
+        state={'customer_texts':['claim']}
+        complete='Preserve document A, plus document B.'
+        self.assertEqual(self.guard.finalize(complete,state),complete)
+        partial=self.guard.finalize('Keep document A.',state)
+        self.assertIn('Keep document A and document B.',partial)
+    def test_notice_corrections_run_even_if_required_topics_already_present(self):
+        self.guard.config['required_notices']=[{'all_patterns':['claim'],
+            'text':'Keep evidence.', 'satisfied_patterns':['evidence'],
+            'remove_unsupported':['Guaranteed compensation!']}]
+        result=self.guard.finalize('Keep evidence. Guaranteed compensation!',{'customer_texts':['claim']})
+        self.assertNotIn('Guaranteed',result)
+        self.assertEqual(result.count('evidence'),1)
     async def test_same_handoff_with_different_wording_is_not_repeated(self):
         await self.execute('order',{'order_no':'foreign'})
         await self.guard.complete(self.agent,None,self.state)
