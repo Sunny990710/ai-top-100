@@ -85,6 +85,9 @@ class ServiceAgent:
             return {'error': 'Case ID not supplied in conversation. Ask for it; never fabricate.'}
         if not self.token:
             return {'error': 'Service API is not configured. No action was performed.'}
+        for field in self.profile.get('verified_argument_fields', []):
+            if field in arguments and arguments[field] not in state.get('verified_values', {}).get(field, set()):
+                return {'error': 'Unverified identifier. Obtain the exact value from a successful API lookup first.', 'field': field}
         now = time.monotonic()
         while self.calls and now-self.calls[0] >= 60:
             self.calls.popleft()
@@ -111,6 +114,8 @@ class ServiceAgent:
             result = {'http_status': response.status_code,
                       'data': response.json() if response.content else None}
             print(f'Service operation={name} status={response.status_code}', flush=True)
+            if response.is_success:
+                self.remember_verified(result['data'], state)
             if op['method']=='POST' and response.is_success:
                 state['writes'][fingerprint] = result
             if response.status_code == 429:
@@ -118,6 +123,16 @@ class ServiceAgent:
             return result
         except (httpx.HTTPError, ValueError):
             return {'error': 'API response unavailable; outcome is unconfirmed. Never claim completion.'}
+
+    def remember_verified(self, data, state):
+        if isinstance(data, dict):
+            for field, value in data.items():
+                if field in self.profile.get('verified_argument_fields', []) and isinstance(value, str):
+                    state.setdefault('verified_values', {}).setdefault(field, set()).add(value)
+                self.remember_verified(value, state)
+        elif isinstance(data, list):
+            for value in data:
+                self.remember_verified(value, state)
 
     def state_for(self, identity, text):
         # Only an explicit case label at message start may select a case.

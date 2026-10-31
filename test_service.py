@@ -96,3 +96,18 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('confirmed', messages[3]['output'])
         self.assertIn('unconfirmed', messages[4]['output'])
         self.assertIn('Not executed', messages[5]['output'])
+
+    async def test_identifier_requires_successful_evidence(self):
+        self.agent.profile['verified_argument_fields'] = ['record_id']
+        seen = []
+        def handler(req):
+            seen.append(req)
+            return httpx.Response(200, json={'ok': True})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            result = await self.agent.execute(client, 'read_record', {'record_id': 'invented'}, self.state)
+            self.assertIn('Unverified', result['error'])
+            self.assertEqual(seen, [])
+            self.agent.remember_verified({'items': [{'record_id': 'real'}]}, self.state)
+            result = await self.agent.execute(client, 'read_record', {'record_id': 'real'}, self.state)
+            self.assertEqual(result['http_status'], 200)
+            self.assertEqual(len(seen), 1)
