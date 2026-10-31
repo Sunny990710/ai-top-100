@@ -17,6 +17,15 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
         self.guard=ServiceGuard(dict(principal_pattern=r'Account: ([^|]+)\|([0-9*]+)',member_search='members',order_get='order',order_list='orders',escalate='handoff',private_fields=['shipping_address','recipient_name','phone'],security=dict(target='SECURITY',lane='REVIEW',priority='urgent',reason='ownership mismatch'),handoff_rules=[]))
         self.guard.capture(self.state,'Account: Alice|010****1234')
     async def execute(self,name,args): return await self.guard.execute(self.agent,None,name,args,self.state)
+    def test_notice_once_when_already_explained_or_appended(self):
+        self.guard.config['required_notices'] = [{'all_patterns':['issue'], 'text':'Policy.', 'satisfied_patterns':['refund', 'replacement'], 'once_key':'remedies'}]
+        for initial in ['Choose refund or replacement.', 'Checking.']:
+            state={'customer_texts':['issue']}
+            first=self.guard.finalize(initial,state)
+            self.assertEqual(first.count('Policy.'), 0 if 'refund' in initial else 1)
+            self.assertEqual(self.guard.finalize('Request received.',state),'Request received.')
+        self.assertIn('Policy.',self.guard.finalize('Checking.',{'customer_texts':['issue']}))
+
     async def test_other_order_no_leak_or_dependent_query_and_one_handoff(self):
         r=await self.execute('order',{'order_no':'foreign'})
         self.assertNotIn('SECRET',str(r));self.assertIn('ACCESS_DENIED',r['error'])

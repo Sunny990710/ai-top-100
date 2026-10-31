@@ -258,11 +258,18 @@ class ServiceGuard:
                 continue
             for pattern in rule.get('remove_unsupported', []):
                 reply = re.sub(pattern, '', reply)
+            notice_key = rule.get('once_key')
+            if notice_key and notice_key in state.get('delivered_notices', []):
+                continue
             satisfied = rule.get('satisfied_patterns', [])
             if satisfied and all(re.search(pattern, reply) for pattern in satisfied):
+                if notice_key:
+                    state.setdefault('delivered_notices', []).append(notice_key)
                 continue
             if rule['text'] not in reply:
                 reply = reply.rstrip() + '\n\n' + rule['text']
+            if notice_key:
+                state.setdefault('delivered_notices', []).append(notice_key)
         comparison = self.config.get('price_comparison')
         if comparison and all(re.search(p, context) for p in comparison['all_patterns']):
             for order in state.get('orders', {}).values():
