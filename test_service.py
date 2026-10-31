@@ -111,3 +111,16 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             result = await self.agent.execute(client, 'read_record', {'record_id': 'real'}, self.state)
             self.assertEqual(result['http_status'], 200)
             self.assertEqual(len(seen), 1)
+
+    async def test_final_review_has_receipt_evidence_and_no_action_tools(self):
+        self.state['writes']={'request':{'http_status':200,'data':{'request_id':'R-verified','request_status':'SUBMITTED'}}}
+        def handler(req):
+            self.assertEqual(req.url.host,'api.openai.com')
+            body=json.loads(req.content)
+            self.assertNotIn('tools',body)
+            evidence=json.loads(body['input'])
+            self.assertEqual(evidence['confirmed_requests'][0]['data']['request_id'],'R-verified')
+            return httpx.Response(200,json={'output':[{'type':'message','content':[{'type':'output_text','text':'접수번호 R-verified. 아직 처리 완료는 아닙니다.'}]}]})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            answer=await self.agent.review_answer(client,'이미 처리가 완료됐습니다.',self.state)
+        self.assertEqual(answer,'접수번호 R-verified. 아직 처리 완료는 아닙니다.')

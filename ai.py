@@ -101,7 +101,8 @@ class Assistant:
 
 def outputs(text):
     if os.getenv('SERVICE_PROFILE_B64') or os.getenv('SERVICE_PROFILE_FILE'):
-        return [{'simpleText': {'text': str(text)[:500]}}]
+        from service_guard import split_text
+        return [{'simpleText': {'text': chunk}} for chunk in split_text(str(text))]
     if isinstance(text, dict) and ('textCard' in text or 'simpleImage' in text):
         return [text]
     return [{'simpleText': {'text': chunk}} for chunk in split_message(text)]
