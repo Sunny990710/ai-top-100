@@ -3,6 +3,7 @@ import os
 from collections import OrderedDict
 
 import httpx
+from cards import help_card, examples_card, reset_card
 
 
 class Assistant:
@@ -16,9 +17,13 @@ class Assistant:
         identity = (data.get('botGroupKey'), data.get('botUserKey'))
         # Missing identifiers must never share conversation history.
         history = self.history.get(identity, []) if all(identity) else []
+        if text in ('도움말', '/help', '메뉴'):
+            return help_card()
+        if text in ('사용 예시', '/examples'):
+            return examples_card()
         if text in ('/reset', '대화 초기화'):
             self.history.pop(identity, None)
-            return '대화 기록을 초기화했어요.'
+            return reset_card()
         if not self.key:
             return 'AI 연결 설정이 필요합니다. 운영자는 OPENAI_API_KEY를 확인해 주세요.'
         if not text or len(text) > 6000:
@@ -63,5 +68,7 @@ class Assistant:
 
 
 def outputs(text):
+    if isinstance(text, dict) and 'textCard' in text:
+        return [text]
     return [{'simpleText': {'text': text[i:i + 1000]}}
             for i in range(0, min(len(text), 3000), 1000)]
