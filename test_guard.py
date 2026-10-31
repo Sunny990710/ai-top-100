@@ -220,3 +220,11 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
         self.guard.config['required_reads']=[{'all_patterns':['bulk'],'arguments':{'member_id':'$member_id'}}]
         self.state['customer_texts'].append('bulk history')
         self.assertTrue(self.guard.needs_principal(self.state))
+
+    def test_promo_notice_requires_verified_reads(self):
+        key='promo:{"code": "C1"}'
+        self.guard.config['required_notices']=[{'all_patterns':['coupon'],'require_evidence':[key],'text':'Verified benefit.'}]
+        self.state['customer_texts'].append('coupon')
+        self.assertNotIn('Verified benefit',self.guard.finalize('Checking.',self.state))
+        self.state['evidence']={key:{'http_status':200,'data':{'code':'C1'}}}
+        self.assertIn('Verified benefit',self.guard.finalize('Checking.',self.state))

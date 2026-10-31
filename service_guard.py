@@ -239,6 +239,9 @@ class ServiceGuard:
     def finalize(self, reply, state):
         context = '\n'.join(state.get('customer_texts', []))
         for rule in self.config.get('required_notices', []):
+            if any(state.get('evidence', {}).get(key, {}).get('http_status') != 200
+                   for key in rule.get('require_evidence', [])):
+                continue
             if rule.get('require_order') and not state.get('orders'):
                 continue
             if rule.get('require_handoff') and rule['require_handoff'] not in state.get('completed_handoffs', {}):
