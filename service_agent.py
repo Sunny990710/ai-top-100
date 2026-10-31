@@ -48,6 +48,7 @@ class ServiceAgent:
         self.key = os.getenv('OPENAI_API_KEY', '').strip()
         self.token = os.getenv('SERVICE_API_TOKEN', '').strip()
         self.model = os.getenv('SERVICE_MODEL', 'gpt-4.1')
+        self.review_model = profile.get('review_model', self.model)
         self.states = OrderedDict()
         self.calls = deque()
         self.operations = {op['name']: op for op in profile['operations']}
@@ -227,7 +228,7 @@ class ServiceAgent:
                  'verified_orders': state.get('orders') or None,
                  'confirmed_requests': list(state['writes'].values()),
                  'verified_lookups': list(state.get('evidence', {}).items())[-12:]}
-        body = {'model': self.model, 'store': False, 'max_output_tokens': 1200,
+        body = {'model': self.review_model, 'store': False, 'max_output_tokens': 3000,
             'instructions': '고객에게 보낼 최종 답변을 검증·교정하는 편집자입니다. 도구를 실행하지 않습니다. '
                 '초안의 사실은 검증된 조회·접수 결과와 아래 정책에 근거한 것만 남기세요. '
                 '고객 질문에 직접 답하고 미확인 필수 질문만 남깁니다. 원래 문의를 재판단하거나 새 주제를 추가하지 않습니다. '
@@ -240,12 +241,12 @@ class ServiceAgent:
                 '공시 URL은 관련 질문일 때만 온전히 유지하세요. 편집 설명 없이 최종 답변만 출력하세요.\n정책:\n'
                 + self.profile['instructions'] + ('\n'+self.guard.guidance(state) if self.guard else ''),
             'input': json.dumps(facts, ensure_ascii=False)}
-        if not self.model.startswith('gpt-5'):
+        if not self.review_model.startswith('gpt-5'):
             body['temperature'] = 0
         else:
             body['reasoning'] = {'effort': 'low'}
         response = await client.post('https://api.openai.com/v1/responses',
-            headers={'Authorization': 'Bearer '+self.key}, json=body, timeout=10)
+            headers={'Authorization': 'Bearer '+self.key}, json=body, timeout=18)
         response.raise_for_status()
         return '\n'.join(p.get('text', '') for item in response.json().get('output', [])
                          if item.get('type') == 'message' for p in item.get('content', [])
