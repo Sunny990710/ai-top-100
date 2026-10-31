@@ -4,6 +4,8 @@ import contextlib
 import json
 import os
 import random
+import signal
+from collections import OrderedDict
 import time
 
 from ai import Assistant, outputs
@@ -26,6 +28,7 @@ class Worker:
         self.ai = Assistant()
         self.jobs = set()
         self.busy = set()
+        self.seen = OrderedDict()
 
     def auth_frame(self):
         if self.session:
@@ -60,7 +63,7 @@ class Worker:
         try:
             async with httpx.AsyncClient(timeout=20) as client:
                 try:
-                    async with asyncio.timeout(260):
+                    async with asyncio.timeout(52 if self.ai.service else 260):
                         text = await self.ai.answer(client, data)
                 except TimeoutError:
                     text = '처리 시간이 길어 요청을 종료했어요. 잠시 후 다시 요청해 주세요.'
@@ -73,6 +76,12 @@ class Worker:
     async def dispatch(self, client, data):
         if not data.get('callbackToken'):
             return
+        callback = data['callbackToken']
+        if callback in self.seen:
+            return
+        self.seen[callback] = True
+        while len(self.seen) > 2048:
+            self.seen.popitem(last=False)
         identity = (data.get('botGroupKey'), data.get('botUserKey'))
         if identity in self.busy or len(self.jobs) >= 8:
             await self.reply(client, data, '질문을 처리 중이에요. 답변이 온 후 다시 보내주세요.')
@@ -136,11 +145,27 @@ class Worker:
             delay = min(delay * 2, 60)
 
 
+async def main(token):
+    worker = Worker(token)
+    task = asyncio.create_task(worker.run())
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, task.cancel)
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    finally:
+        for job in worker.jobs:
+            job.cancel()
+        await asyncio.gather(*worker.jobs, return_exceptions=True)
+
+
 if __name__ == '__main__':
     token = os.environ.get('BOT_TOKEN', '').strip()
     if not token:
         raise SystemExit('Set BOT_TOKEN in the service environment variables.')
     try:
-        asyncio.run(Worker(token).run())
+        asyncio.run(main(token))
     except KeyboardInterrupt:
         pass

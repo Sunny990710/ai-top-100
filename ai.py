@@ -2,6 +2,7 @@
 import os
 import json
 from image_service import ImageService, IMAGE_TOOL
+from service_agent import ServiceAgent, load_profile
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from web_results import render_response, split_message
@@ -13,12 +14,16 @@ from cards import help_card, examples_card, reset_card
 
 class Assistant:
     def __init__(self):
+        profile = load_profile()
+        self.service = ServiceAgent(profile) if profile else None
         self.history = OrderedDict()
         self.images = ImageService()
         self.key = os.environ.get('OPENAI_API_KEY', '').strip()
         self.model = os.environ.get('OPENAI_MODEL', 'gpt-5-mini')
 
     async def answer(self, client, data):
+        if self.service:
+            return await self.service.answer(client, data)
         text = data.get('content', '').strip()
         identity = (data.get('botGroupKey'), data.get('botUserKey'))
         # Missing identifiers must never share conversation history.
@@ -95,6 +100,8 @@ class Assistant:
 
 
 def outputs(text):
+    if os.getenv('SERVICE_PROFILE_B64') or os.getenv('SERVICE_PROFILE_FILE'):
+        return [{'simpleText': {'text': str(text)[:500]}}]
     if isinstance(text, dict) and ('textCard' in text or 'simpleImage' in text):
         return [text]
     return [{'simpleText': {'text': chunk}} for chunk in split_message(text)]
