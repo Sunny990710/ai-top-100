@@ -166,6 +166,38 @@ class ServiceAgent:
                 break
         return content
 
+    async def run_calls(self, client, calls, messages, state):
+        # Reserve every result before execution: cancellation must not leave orphan calls.
+        slots = []
+        for call in calls:
+            slot = {'type': 'function_call_output', 'call_id': call['call_id'],
+                    'output': json.dumps({'error': 'Not executed: interrupted before confirmation.'})}
+            messages.append(slot)
+            slots.append(slot)
+
+        async def run(index):
+            call = calls[index]
+            slots[index]['output'] = json.dumps({'error': 'Execution interrupted; outcome unconfirmed. Check records before retrying.'})
+            try:
+                args = json.loads(call['arguments'])
+                result = await self.execute(client, call['name'], args, state)
+            except (ValueError, KeyError, TypeError, AttributeError):
+                result = {'error': 'Invalid tool arguments'}
+            slots[index]['output'] = json.dumps(result, ensure_ascii=False)
+
+        pending = []
+        for index, call in enumerate(calls):
+            op = self.operations.get(call['name'], {})
+            if op.get('method') == 'GET' or call['name'] == 'read_policy':
+                pending.append(index)
+            else:
+                if pending:
+                    await asyncio.gather(*(run(i) for i in pending))
+                    pending = []
+                await run(index)
+        if pending:
+            await asyncio.gather(*(run(i) for i in pending))
+
     async def answer(self, client, data):
         text = str(data.get('content', '')).strip()[:12000]
         identity = (data.get('botGroupKey'), data.get('botUserKey'))
@@ -205,14 +237,7 @@ class ServiceAgent:
                         # Preserve verified tool outputs across turns, not only the prose answer.
                         state['messages'] = messages
                         return result[:500]
-                    for call in calls:
-                        try:
-                            args = json.loads(call['arguments'])
-                            result = await self.execute(client, call['name'], args, state)
-                        except (ValueError, KeyError, TypeError):
-                            result = {'error': 'Invalid tool arguments'}
-                        messages.append({'type':'function_call_output', 'call_id':call['call_id'],
-                                         'output': json.dumps(result, ensure_ascii=False)})
+                    await self.run_calls(client, calls, messages, state)
         except (TimeoutError, httpx.HTTPError, ValueError):
             pass
         # Keep successfully received tool outcomes, including writes, even on timeout.

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import unittest
 import httpx
@@ -56,3 +57,42 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     def test_integer_validation(self):
         self.assertFalse(validate(True,{'type':'integer'}));self.assertFalse(validate(-1,{'type':'integer'}))
+
+    async def test_independent_reads_parallel_writes_ordered(self):
+        active = set()
+        both_started = asyncio.Event()
+        completed = []
+        async def execute(client, name, args, state):
+            record = args['record_id']
+            if name == 'read_record':
+                active.add(record)
+                if len(active) == 2:
+                    both_started.set()
+                await asyncio.wait_for(both_started.wait(), 1)
+            else:
+                self.assertEqual(set(completed), {'1', '2'})
+            completed.append(record)
+            return {'ok': record}
+        self.agent.execute = execute
+        calls = [{'name': name, 'call_id': str(i), 'arguments': json.dumps({'record_id': str(i)})}
+                 for i, name in [(1, 'read_record'), (2, 'read_record'), (3, 'submit_request')]]
+        messages = list(calls)
+        await self.agent.run_calls(None, calls, messages, self.state)
+        self.assertEqual(completed[-1], '3')
+        self.assertEqual([x['call_id'] for x in messages[3:]], ['1', '2', '3'])
+
+    async def test_interruption_keeps_all_results_and_success(self):
+        async def execute(client, name, args, state):
+            if args['record_id'] == '2':
+                raise asyncio.CancelledError()
+            return {'request_id': 'confirmed'}
+        self.agent.execute = execute
+        calls = [{'name': 'submit_request', 'call_id': str(i), 'arguments': json.dumps({'record_id': str(i)})}
+                 for i in range(1, 4)]
+        messages = list(calls)
+        with self.assertRaises(asyncio.CancelledError):
+            await self.agent.run_calls(None, calls, messages, self.state)
+        self.assertEqual(len(messages), 6)
+        self.assertIn('confirmed', messages[3]['output'])
+        self.assertIn('unconfirmed', messages[4]['output'])
+        self.assertIn('Not executed', messages[5]['output'])
