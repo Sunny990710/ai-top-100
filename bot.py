@@ -1,10 +1,12 @@
-"""Kakao gateway echo worker. No credentials or chat contents are logged."""
+"""Kakao gateway AI worker. No credentials or chat contents are logged."""
 import asyncio
 import contextlib
 import json
 import os
 import random
 import time
+
+from ai import Assistant, outputs
 
 import httpx
 import websockets
@@ -14,10 +16,6 @@ GATEWAY = 'wss://bot-gateway.kakao.com/gateway'
 CALLBACK = 'https://kapi.kakao.com/v1/bot/callback'
 
 
-def answer(text):
-    # Replace with the actual agent after the competition requirements are known.
-    return f'echo: {text}'
-
 
 class Worker:
     def __init__(self, token):
@@ -25,6 +23,9 @@ class Worker:
         self.session = None
         self.seq = 0
         self.connected_at = None
+        self.ai = Assistant()
+        self.jobs = set()
+        self.busy = set()
 
     def auth_frame(self):
         if self.session:
@@ -41,20 +42,41 @@ class Worker:
             state['pending'] = True
             await ws.send(json.dumps({'op': 1}))
 
-    async def reply(self, client, data):
-        if not data.get('callbackToken'):
-            return
+    async def reply(self, client, data, text):
         try:
             response = await client.post(CALLBACK, headers={
                 'Authorization': f'KakaoAK {self.token}',
                 'X-Bot-Callback-Token': data['callbackToken'],
             }, json={'skillResponse': {'version': '2.0', 'template': {
-                'outputs': [{'simpleText': {'text': answer(data.get('content', ''))}}]
+                'outputs': outputs(text)
             }}})
-            # Do not retry callbacks blindly: a timeout may follow a delivered reply.
             print(f'Callback HTTP {response.status_code}', flush=True)
-        except httpx.HTTPError as exc:
+            if response.is_success:
+                print(f"Callback errors: {response.json().get('errorCount', 'unknown')}", flush=True)
+        except (httpx.HTTPError, ValueError) as exc:
             print(f'Callback failed: {type(exc).__name__}', flush=True)
+
+    async def process(self, data, identity):
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                text = await self.ai.answer(client, data)
+                await self.reply(client, data, text)
+        except Exception as exc:
+            print(f'Message failed: {type(exc).__name__}', flush=True)
+        finally:
+            self.busy.discard(identity)
+
+    async def dispatch(self, client, data):
+        if not data.get('callbackToken'):
+            return
+        identity = (data.get('botGroupKey'), data.get('botUserKey'))
+        if identity in self.busy or len(self.jobs) >= 8:
+            await self.reply(client, data, '질문을 처리 중이에요. 답변이 온 후 다시 보내주세요.')
+            return
+        self.busy.add(identity)
+        job = asyncio.create_task(self.process(data, identity))
+        self.jobs.add(job)
+        job.add_done_callback(self.jobs.discard)
 
     async def connection(self):
         async with websockets.connect(GATEWAY, open_timeout=20) as ws:
@@ -79,7 +101,7 @@ class Worker:
                             state['pending'] = False
                         elif event.get('op') == 0:
                             if event.get('t') == 'MESSAGE_CREATE':
-                                await self.reply(client, event['d'])
+                                await self.dispatch(client, event['d'])
                             self.seq = event.get('s', self.seq)
             finally:
                 pulse.cancel()
