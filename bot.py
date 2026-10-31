@@ -59,7 +59,11 @@ class Worker:
     async def process(self, data, identity):
         try:
             async with httpx.AsyncClient(timeout=20) as client:
-                text = await self.ai.answer(client, data)
+                try:
+                    async with asyncio.timeout(260):
+                        text = await self.ai.answer(client, data)
+                except TimeoutError:
+                    text = '처리 시간이 길어 요청을 종료했어요. 잠시 후 다시 요청해 주세요.'
                 await self.reply(client, data, text)
         except Exception as exc:
             print(f'Message failed: {type(exc).__name__}', flush=True)

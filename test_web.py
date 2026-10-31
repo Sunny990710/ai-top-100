@@ -10,8 +10,8 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         url='https://example.org/exchange'
         def handler(request):
             body=json.loads(request.content)
-            self.assertEqual(body['tools'],[{'type':'web_search'}])
-            self.assertEqual(body['tool_choice'],'required')
+            self.assertIn({'type':'web_search'},body['tools'])
+            self.assertEqual(body['tool_choice'],{'type':'web_search'})
             self.assertEqual(body['reasoning']['effort'],'low')
             return httpx.Response(200,json={'output':[
                 {'type':'web_search_call','status':'completed'},

@@ -53,3 +53,20 @@ Responses API의 `web_search`를 사용합니다. 일반 질문은 모델이 검
 API 인용 annotation을 답변 중 클릭 가능한 URL로 변환하며 URL을 말풍선 경계에서 자르지 않습니다.
 최대 3개 말풍선에 출처를 포함할 수 없으면 짧은 질문으로 재요청하도록 안내합니다.
 AI 요청 제한시간은 웹 검색을 위해 120초로 변경했습니다.
+
+## 이미지 생성
+
+그림 요청은 Responses의 `generate_image` 함수 호출로 분류하고 OpenAI Images API에서 실제 이미지를 생성합니다.
+기본 모델은 `gpt-image-1.5`, medium 품질, 1024×1024 JPEG 한 장입니다.
+`OPENAI_IMAGE_MODEL`로 모델을 변경할 수 있습니다. API 계정의 이미지 모델 접근 권한/조직 인증과 잔액이 필요합니다.
+
+Render Environment에 `CLOUDINARY_URL=cloudinary://API_KEY:API_SECRET@CLOUD_NAME`을 설정합니다.
+Cloudinary Console의 API Keys에서 값을 복사하고 저장소나 채팅에는 붙여넣지 않습니다.
+이미지는 서버에서 인증된 업로드로 저장하고 HTTPS URL을 Kakao SimpleImage로 보냅니다.
+생성된 이미지는 URL을 아는 사람이 열 수 있으며 Cloudinary에 유지됩니다. 개인정보가 담긴 그림은 요청하지 마세요.
+저장소 미설정 상태에서는 유료 이미지 생성 요청을 보내지 않습니다. 업로드 실패 후 자동 재생성하지 않습니다.
+이미지 생성은 동시 2개, 전체 메시지 처리는 최대 260초로 제한해 5분 콜백 만료 전에 응답합니다.
+현재 텍스트 기반 새 이미지 생성만 지원하며 입력 사진 편집은 지원하지 않습니다.
+
+검증: `python -m unittest -v test_bot.py test_web.py test_images.py` (외부 호출은 mock).
+실제 배포 검증은 `크리스마스 그림 그려줘`를 보내 이미지 수신과 generation/upload/callback 로그를 확인합니다.
