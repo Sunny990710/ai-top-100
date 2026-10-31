@@ -4,6 +4,7 @@ Tenant-specific identifiers, rules and routing live in the private profile.
 """
 import json
 import re
+from datetime import date, timedelta
 
 
 class ServiceGuard:
@@ -180,6 +181,51 @@ class ServiceGuard:
         text = '\n'.join(state.get('customer_texts', []))
         return '\n'.join(rule['instruction'] for rule in self.config.get('guidance', [])
                          if all(re.search(p, text) for p in rule['all_patterns']))
+
+    def finalize(self, reply, state):
+        context = '\n'.join(state.get('customer_texts', []))
+        for rule in self.config.get('required_notices', []):
+            if not all(re.search(p, context) for p in rule['all_patterns']):
+                continue
+            if any(re.search(p, context) for p in rule.get('exclude_patterns', [])):
+                continue
+            for pattern in rule.get('remove_unsupported', []):
+                reply = re.sub(pattern, '', reply)
+            if rule['text'] not in reply:
+                reply = reply.rstrip() + '\n\n' + rule['text']
+        intake = re.search(r'상담\s*인입\s*일시:\s*(\d{4})-', context)
+        if intake:
+            def weekday(match):
+                try:
+                    day = date(int(intake.group(1)), int(match.group(1)), int(match.group(2)))
+                    return f'{day.month}월 {day.day}일({"월화수목금토일"[day.weekday()]})'
+                except ValueError:
+                    return match.group(0)
+            reply = re.sub(r'(\d{1,2})월\s*(\d{1,2})일\s*\([월화수목금토일]\)', weekday, reply)
+        return reply.strip()
+
+    def calendar_facts(self, state):
+        context = '\n'.join(state.get('customer_texts', []))
+        intake = re.search(r'상담\s*인입\s*일시:\s*(\d{4}-\d{2}-\d{2})', context)
+        if not intake:
+            return []
+        today = date.fromisoformat(intake.group(1))
+        facts = []
+        for result in state.get('evidence', {}).values():
+            data = result.get('data')
+            for row in data if isinstance(data, list) else [data]:
+                if not isinstance(row, dict) or not row.get('delivered_at'):
+                    continue
+                received = date.fromisoformat(row['delivered_at'][:10])
+                fact = {'order_no': row.get('order_no'), 'received_date': str(received),
+                        'today': str(today), 'elapsed_days': (today-received).days}
+                window = self.config.get('return_window_days')
+                if window:
+                    fact['return_window_days'] = window
+                    fact['return_window_last_day'] = str(received+timedelta(days=window))
+                if fact not in facts:
+                    facts.append(fact)
+        return facts
 
 
 def split_text(text, limit=500):

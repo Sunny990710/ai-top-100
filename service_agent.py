@@ -223,6 +223,7 @@ class ServiceAgent:
 
     async def review_answer(self, client, draft, state):
         facts = {'draft': draft, 'customer_messages': state.get('customer_texts', [])[-2:],
+                 'calendar_calculations': self.guard.calendar_facts(state) if self.guard else [],
                  'verified_orders': state.get('orders') or None,
                  'confirmed_requests': list(state['writes'].values()),
                  'verified_lookups': list(state.get('evidence', {}).items())[-12:]}
@@ -231,6 +232,7 @@ class ServiceAgent:
                 '초안의 사실은 검증된 조회·접수 결과와 아래 정책에 근거한 것만 남기세요. '
                 '고객 질문에 직접 답하고 미확인 필수 질문만 남깁니다. 원래 문의를 재판단하거나 새 주제를 추가하지 않습니다. '
                 '조회 기록이 없거나 null인 것은 아직 조회하지 않았다는 뜻이며 주문이 없다는 뜻이 절대 아닙니다. '
+                '경과일·반품기한은 calendar_calculations의 계산값만 사용하고 초안의 다른 날짜는 교정하세요. '
                 '한국어 250~600자, 필수사항이 많으면 900자. 접수번호·회신기한·핵심조건·선택지는 보존하세요. '
                 'SUBMITTED는 접수만 의미하며 발급·출고·환급 완료나 즉시 사용을 뜻하지 않습니다. '
                 '근거 없는 법률적 위협·고객 책임 주장·증빙 강요·임의 증빙기한·자동알림·연락 약속·처리일정은 삭제하세요. '
@@ -240,6 +242,8 @@ class ServiceAgent:
             'input': json.dumps(facts, ensure_ascii=False)}
         if not self.model.startswith('gpt-5'):
             body['temperature'] = 0
+        else:
+            body['reasoning'] = {'effort': 'low'}
         response = await client.post('https://api.openai.com/v1/responses',
             headers={'Authorization': 'Bearer '+self.key}, json=body, timeout=10)
         response.raise_for_status()
@@ -311,6 +315,7 @@ class ServiceAgent:
                             break
                         if self.guard:
                             result = await self.review_answer(client, result, state)
+                            result = self.guard.finalize(result, state)
                             # Future turns see the verified reply, not the discarded draft.
                             messages = messages[:-len(outputs)] + [{'role': 'assistant', 'content': result}]
                         # Preserve verified tool outputs across turns, not only the prose answer.

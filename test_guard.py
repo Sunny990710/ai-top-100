@@ -70,3 +70,19 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
         r=await self.execute('order',{'order_no':'123456789'})
         self.assertIn('ACCESS_DENIED',r['error'])
         self.assertTrue(any(n=='order' for n,a in self.agent.calls))
+    def test_required_condition_survives_final_rewrite(self):
+        self.guard.config['required_notices']=[{'all_patterns':['medical'], 'remove_unsupported':['instant refund'], 'text':'Refund requires verified eligibility.'}]
+        self.state['customer_texts'].append('medical claim')
+        answer=self.guard.finalize('Receipt E1. instant refund',self.state)
+        self.assertIn('Receipt E1',answer);self.assertNotIn('instant refund',answer)
+        self.assertIn('Refund requires verified eligibility.',answer)
+    def test_weekday_uses_intake_year(self):
+        self.state['customer_texts'].append('상담 인입 일시: 2037-06-30')
+        self.assertEqual(self.guard.finalize('회신 7월 3일(수)',self.state),'회신 7월 3일(금)')
+    def test_delivery_window_calculation(self):
+        self.guard.config['return_window_days']=7
+        self.state['customer_texts'].append('상담 인입 일시: 2037-06-30')
+        self.state['evidence']={'shipment':{'data':[{'order_no':'own','delivered_at':'2037-06-26T14:00:00+09:00'}]}}
+        fact=self.guard.calendar_facts(self.state)[0]
+        self.assertEqual(fact['elapsed_days'],4)
+        self.assertEqual(fact['return_window_last_day'],'2037-07-03')
